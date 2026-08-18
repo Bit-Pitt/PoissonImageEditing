@@ -1,11 +1,16 @@
 """
-Poisson Image Editing (Perez, Gangnet, Blake 2003) - seamless cloning base (v = grad(S)).
+Poisson Image Editing - motore generico.
 
-Pipeline:
-  1. Si assegna un indice lineare a ogni pixel dentro la maschera Omega.
-  2. Si costruisce la matrice sparsa A (Laplaciano discreto, 4-connesso).
-  3. Si costruisce il vettore b (divergenza del campo di gradienti + boundary da target).
-  4. Si risolve A x = b per ciascun canale colore separatamente.
+Il "motore" (build_A, build_b, solve) e' lo STESSO per tutte le varianti
+(cloning, mixed gradients, texture flattening, illumination change).
+Cio' che cambia tra una variante e l'altra e' solo il campo di guida v_pq,
+vedi guidance.py.
+
+Perche' A e' condivisa tra tutte le varianti:
+A rappresenta il Laplaciano discreto sul dominio Omega (equazione 6 del
+paper di Perez et al.) - dipende unicamente da QUALI pixel sono dentro/fuori
+Omega, non dai valori dei gradienti. v_pq invece e' cio' che varia per
+ottenere seamless cloning, mixed gradients, texture flattening, ecc.
 """
 import numpy as np
 import scipy.sparse as sp
@@ -35,11 +40,9 @@ def build_index_map(mask: np.ndarray):
 def build_A(mask: np.ndarray, index_map: np.ndarray, coords) -> sp.csr_matrix:
     """Costruisce la matrice sparsa del Laplaciano discreto per i pixel in Omega.
 
-    Per ogni pixel p in Omega:
-      - 4 sulla diagonale (il numero di vicini, sempre 4 per grid 4-connessa)
-      - -1 nella colonna di ogni vicino che e' ANCHE in Omega
-      (i vicini fuori da Omega non generano una colonna: il loro contributo
-       va nel vettore b, non in A - sono le condizioni al contorno di Dirichlet)
+    IDENTICA per tutte le varianti: dipende solo dalla topologia di Omega
+    (quali pixel sono dentro, quali vicini sono anch'essi dentro), mai dai
+    valori dei gradienti. Va costruita una sola volta per blend.
     """
     n = len(coords)
     H, W = mask.shape
@@ -49,49 +52,51 @@ def build_A(mask: np.ndarray, index_map: np.ndarray, coords) -> sp.csr_matrix:
         A[row_idx, row_idx] = 4.0
         for ny, nx in _neighbors(y, x):
             if 0 <= ny < H and 0 <= nx < W and mask[ny, nx]:
-                col_idx = index_map[ny, nx]
-                A[row_idx, col_idx] = -1.0
+                A[row_idx, index_map[ny, nx]] = -1.0
 
     return A.tocsr()
 
 
-def build_b(source: np.ndarray, target: np.ndarray, mask: np.ndarray, coords) -> np.ndarray:
+def build_b(target_channel: np.ndarray, mask: np.ndarray, coords, guidance_fn) -> np.ndarray:
     """Costruisce il vettore b per UN canale colore.
 
+    guidance_fn(y, x, ny, nx) -> v_pq (scalare): il valore del campo di guida
+    sull'edge p=(y,x) -> q=(ny,nx). E' l'UNICA cosa che cambia tra le varianti
+    (vedi guidance.py per le diverse definizioni di v_pq).
+
     Per ogni pixel p in Omega:
-      b[p] = divergenza discreta di v (qui v = grad(source), quindi seamless cloning base)
-           + somma dei valori noti di target per i vicini FUORI da Omega (Dirichlet boundary)
+      b[p] = somma di v_pq sui 4 vicini
+           + somma dei valori noti di target per i vicini FUORI da Omega
+             (condizioni al contorno di Dirichlet)
     """
     n = len(coords)
     H, W = mask.shape
     b = np.zeros(n, dtype=np.float64)
 
     for row_idx, (y, x) in enumerate(coords):
-        # divergenza discreta del gradiente sorgente: 4*S(p) - somma S(vicini)
-        val = 4.0 * source[y, x]
+        val = 0.0
         for ny, nx in _neighbors(y, x):
             if 0 <= ny < H and 0 <= nx < W:
-                val -= source[ny, nx]
-                # se il vicino e' FUORI da Omega, il suo valore e' noto (= target)
-                # e va aggiunto qui come termine noto (boundary condition)
+                val += guidance_fn(y, x, ny, nx)
                 if not mask[ny, nx]:
-                    val += target[ny, nx]
+                    val += target_channel[ny, nx]
             else:
-                # vicino fuori dall'immagine: trattalo come se valesse quanto il pixel stesso
-                # (evita di dover gestire un caso limite raro se Omega tocca il bordo immagine)
-                val += target[y, x]
+                # vicino fuori dall'immagine: assumiamo v_pq=0 (gradiente nullo
+                # al bordo dell'immagine) e trattiamo il "vicino fantasma" come
+                # se avesse il valore target[p] stesso (bordo riflesso)
+                val += target_channel[y, x]
         b[row_idx] = val
 
     return b
 
 
-def poisson_blend(source: np.ndarray, target: np.ndarray, mask: np.ndarray) -> np.ndarray:
-    """Esegue il seamless cloning base (v = grad(source)).
+def solve_poisson(source: np.ndarray, target: np.ndarray, mask: np.ndarray, guidance_factory) -> np.ndarray:
+    """Risolve il sistema di Poisson per tutti i canali, usando il campo di
+    guida prodotto da guidance_factory.
 
-    source, target: array (H, W, 3) float64, stessa shape
-    mask: array (H, W) bool
-
-    Ritorna l'immagine risultato (H, W, 3) float64.
+    guidance_factory: callable con firma (channel_idx, source_ch, target_ch)
+                       -> guidance_fn(y, x, ny, nx) -> v_pq
+                       (vedi le factory in guidance.py)
     """
     assert source.shape == target.shape, "source e target devono avere la stessa shape"
     assert mask.shape == source.shape[:2], "mask deve avere la stessa H,W di source/target"
@@ -100,15 +105,16 @@ def poisson_blend(source: np.ndarray, target: np.ndarray, mask: np.ndarray) -> n
     if len(coords) == 0:
         raise ValueError("La maschera e' vuota: nessun pixel da clonare.")
 
-    A = build_A(mask, index_map, coords)
+    A = build_A(mask, index_map, coords)  # costruita UNA VOLTA, riusata per ogni canale
 
     result = target.copy()
     n_channels = source.shape[2]
 
     for c in range(n_channels):
-        b = build_b(source[:, :, c], target[:, :, c], mask, coords)
+        guidance_fn = guidance_factory(c, source[:, :, c], target[:, :, c])
+        b = build_b(target[:, :, c], mask, coords, guidance_fn)
         x = spsolve(A, b)
-        for idx, (y, x_coord) in enumerate(coords):
-            result[y, x_coord, c] = x[idx]
+        for idx, (y, xx) in enumerate(coords):
+            result[y, xx, c] = x[idx]
 
     return result

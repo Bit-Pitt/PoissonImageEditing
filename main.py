@@ -16,56 +16,99 @@ import time
 from pathlib import Path
 
 from io_utils import load_image, load_mask, save_image
-from poisson import poisson_blend
+from variants import (
+    poisson_blend,
+    mixed_gradients_blend,
+    texture_flattening_blend,
+    illumination_change_blend,
+)
 
 DATA_DIR = Path("data")
 
 # Registro dei metodi: nome sottocomando -> funzione di blending.
-# Per aggiungere un nuovo metodo in futuro basta implementare la funzione
-# (stessa firma: source, target, mask -> risultato) e aggiungerla qui.
+# Per aggiungere un nuovo metodo in futuro basta implementare la funzione in
+# variants.py (stessa firma: source, target, mask, **kwargs -> risultato) e
+# aggiungerla qui. Se ha parametri extra, aggiungerli anche a EXTRA_ARGS sotto.
 METHODS = {
     "cloning": poisson_blend,
-    # "mixed": mixed_gradients_blend,
-    # "flatten": texture_flattening_blend,
-    # "illumination": illumination_change_blend,
+    "mixed": mixed_gradients_blend,
+    "flatten": texture_flattening_blend,
+    "illumination": illumination_change_blend,
+    # "tiling": seamless_tiling_blend,  # diverso dagli altri: preprocessing dei bordi, non un guidance field
 }
+
+# Parametri CLI specifici per metodo, oltre a quelli comuni (--test, --source, ...).
+# Formato: nome_metodo -> lista di dict passati direttamente ad add_argument.
+EXTRA_ARGS = {
+    "flatten": [
+        {"flags": ["--sigma"], "type": float, "default": 1.5,
+         "help": "Sigma del filtro gaussiano per l'edge detector Canny (default 1.5)"},
+        {"flags": ["--flatten-factor"], "type": float, "default": 3.0,
+         "help": "Fattore di flattening per l'appiattimento della texture (default 3.0)"},
+    ],
+    "illumination": [
+        {"flags": ["--alpha"], "type": float, "default": 0.2,
+         "help": "Parametro alpha di compressione del gradiente (default 0.2)"},
+        {"flags": ["--beta"], "type": float, "default": 0.2,
+         "help": "Parametro beta di compressione del gradiente, in [0,1] (default 0.2)"},
+    ],
+}
+
+# Metodi che lavorano IN-PLACE su un'unica immagine + maschera (nessun compositing
+# tra due immagini diverse): texture flattening e illumination change nel paper si
+# applicano a source stessa (source == target). Per questi non serve un file
+# "source" separato: se manca, si usa direttamente target.
+SELF_EDIT_METHODS = {"flatten", "illumination"}
+
+def _find_file(test_dir: Path, base_name: str, required: bool = True):
+    """Cerca test_dir/base_name.{png,jpg,jpeg}. Se required=False e non trova
+    nulla, ritorna None invece di sollevare un errore."""
+    for ext in (".png", ".jpg", ".jpeg"):
+        p = test_dir / f"{base_name}{ext}"
+        if p.exists():
+            return p
+    if required:
+        raise SystemExit(f"Non trovo '{base_name}' (.png/.jpg/.jpeg) in {test_dir}")
+    return None
 
 
 def resolve_paths(args, method_name: str):
     """Determina i path di source/mask/target/output.
 
-    Se --test è specificato, usa data/testN/{source,mask,target}.png e come
-    output data/testN/result_<method>.png, a meno che --output non sia dato esplicitamente.
-    Altrimenti richiede --source/--mask/--target espliciti.
+    Se --test è specificato, usa data/testN/{source,mask,target}.png/jpg/jpeg
+    e come output data/testN/result_<method>.png, a meno che --output non sia
+    dato esplicitamente. Altrimenti richiede --mask/--target espliciti
+    (--source è opzionale per i metodi in SELF_EDIT_METHODS).
     """
+    is_self_edit = method_name in SELF_EDIT_METHODS
+
     if args.test is not None:
-        test_dir = DATA_DIR / f"test{args.test}"
-        
-        # Funzione di supporto per cercare il file con estensioni diverse
-        def find_file(base_name, default_ext=".png"):
-            for ext in [".png", ".jpg", ".jpeg"]:
-                p = test_dir / f"{base_name}{ext}"
-                if p.exists():
-                    return p
-            return test_dir / f"{base_name}{default_ext}" # Fallback se nessuno esiste
+        test_dir = DATA_DIR / ("illum1" if args.test == 6 else f"test{args.test}")
 
-        source = args.source or find_file("source")
-        mask = args.mask or find_file("mask")
-        target = args.target or find_file("target")
+        mask = args.mask or _find_file(test_dir, "mask")
+        target = args.target or _find_file(test_dir, "target")
+
+        if args.source:
+            source = args.source
+        else:
+            # per i metodi self-edit la source è opzionale: se manca, usa target
+            found = _find_file(test_dir, "source", required=not is_self_edit)
+            source = found or target
+
         output = args.output or test_dir / f"result_{method_name}.png"
-
     else:
-        missing = [name for name in ("source", "mask", "target") if getattr(args, name) is None]
+        required_names = ["mask", "target"] if is_self_edit else ["source", "mask", "target"]
+        missing = [name for name in required_names if getattr(args, name) is None]
         if missing:
             raise SystemExit(
-                f"Devi specificare --test N oppure tutti i path espliciti "
+                f"Devi specificare --test N oppure {'--mask/--target' if is_self_edit else 'tutti i path espliciti'} "
                 f"(mancano: {', '.join('--' + m for m in missing)})"
             )
-        source, mask, target = args.source, args.mask, args.target
+        mask, target = args.mask, args.target
+        source = args.source or (target if is_self_edit else None)
         output = args.output or Path("result.png")
 
     return Path(source), Path(mask), Path(target), Path(output)
-
 
 def add_common_args(subparser):
     """Argomenti condivisi da tutti i sottocomandi (metodi)."""
@@ -86,8 +129,23 @@ def parse_args():
     for name in METHODS:
         sp = subparsers.add_parser(name, help=f"Esegui il metodo '{name}'")
         add_common_args(sp)
+        for extra in EXTRA_ARGS.get(name, []):
+            flags = extra["flags"]
+            kwargs = {k: v for k, v in extra.items() if k != "flags"}
+            sp.add_argument(*flags, **kwargs)
 
     return parser.parse_args()
+
+
+def extra_kwargs(args, method_name: str) -> dict:
+    """Estrae dagli args solo i parametri specifici del metodo (EXTRA_ARGS),
+    da passare come **kwargs alla funzione di blending."""
+    kwargs = {}
+    for extra in EXTRA_ARGS.get(method_name, []):
+        # nome del parametro = flag senza i due trattini iniziali, es. "--sigma" -> "sigma"
+        dest = extra["flags"][0].lstrip("-").replace("-", "_")
+        kwargs[dest] = getattr(args, dest)
+    return kwargs
 
 
 def main():
@@ -104,10 +162,10 @@ def main():
     mask = load_mask(mask_path)
     print(f"      Pixel in Omega: {mask.sum()}")
 
-    print(f"[4/4] Eseguo metodo '{args.method}'...")
+    kwargs = extra_kwargs(args, args.method)
+    print(f"[4/4] Eseguo metodo '{args.method}'{f' {kwargs}' if kwargs else ''}...")
     t0 = time.time()
-    #esegue la funzione di blending corrispondente al metodo scelto
-    result = blend_fn(source, target, mask)            
+    result = blend_fn(source, target, mask, **kwargs)
     print(f"      Fatto in {time.time() - t0:.2f}s")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
