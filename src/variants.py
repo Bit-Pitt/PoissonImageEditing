@@ -8,6 +8,7 @@ parametri specifici della variante (sigma, alpha, beta...) arrivano via
 functools.partial prima di chiamare il motore generico solve_poisson.
 """
 from functools import partial
+import numpy as np
 
 from skimage.color import rgb2gray
 from skimage.feature import canny
@@ -19,6 +20,8 @@ from guidance import (
     flattening_guidance_factory,
     illumination_guidance_factory,
 )
+
+from preprocessing import build_tileable_boundary_target, build_tiling_mask
 
 
 def poisson_blend(source, target, mask, **kwargs):
@@ -50,3 +53,39 @@ def illumination_change_blend(source, target, mask, alpha: float = 0.2, beta: fl
     direzione e segno (vedi guidance.illumination_guidance_factory)."""
     factory = partial(illumination_guidance_factory, alpha=alpha, beta=beta)
     return solve_poisson(source, target, mask, factory)
+
+
+from skimage.color import rgb2hsv, hsv2rgb
+def local_color_change_blend(source, target, mask, hue_shift: float = 0.0, **kwargs):
+    """Local color change via rotazione della tonalita' (hue) in spazio HSV.
+
+    Non usiamo uno shift additivo costante in RGB: essendo costante su tutta
+    Omega, si cancella identicamente nel gradiente interno (v_pq = T_p - T_q,
+    invariato) e la soluzione esatta del sistema Poisson degenera nel
+    copia-incolla puro (dimostrabile analiticamente). La rotazione hue invece
+    e' non lineare e non uniforme in RGB (dipende da saturazione/luminosita'
+    di ogni pixel), quindi introduce un vero gradiente che Poisson propaga
+    con blending smussato al bordo.
+
+    hue_shift: spostamento della tonalita' in [0,1], ciclico (es. 0.33 ~ rosso->verde).
+    """
+    target_hsv = rgb2hsv(target / 255.0)
+    src_hsv = target_hsv.copy()
+    src_hsv[..., 0] = (src_hsv[..., 0] + hue_shift) % 1.0
+    synthetic_source = hsv2rgb(src_hsv) * 255.0
+
+    return solve_poisson(synthetic_source, target, mask, cloning_guidance_factory)
+
+
+
+def seamless_tiling_blend(source, target, mask, **kwargs):
+    """Seamless tiling:  e' tutto nel preprocessing: si forza il bordo esterno a valori mediati (sx=dx,
+    nord=sud) come condizione al contorno, e si lascia che Poisson propaghi
+    la texture originale del tile verso quei nuovi bordi.
+
+    source/target/mask passati vengono ignorati: tutto e' derivato da
+    source stesso (che qui e' orig_tile).
+    """
+    tileable_target = build_tileable_boundary_target(source)
+    tiling_mask = build_tiling_mask(source.shape)
+    return solve_poisson(source, tileable_target, tiling_mask, cloning_guidance_factory)

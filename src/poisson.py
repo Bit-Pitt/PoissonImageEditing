@@ -101,6 +101,7 @@ def solve_poisson(source: np.ndarray, target: np.ndarray, mask: np.ndarray, guid
     assert source.shape == target.shape, "source e target devono avere la stessa shape"
     assert mask.shape == source.shape[:2], "mask deve avere la stessa H,W di source/target"
 
+
     index_map, coords = build_index_map(mask)
     if len(coords) == 0:
         raise ValueError("La maschera e' vuota: nessun pixel da clonare.")

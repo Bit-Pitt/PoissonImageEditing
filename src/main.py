@@ -19,9 +19,13 @@ from io_utils import load_image, load_mask, save_image
 from variants import (
     poisson_blend,
     mixed_gradients_blend,
+    seamless_tiling_blend,
     texture_flattening_blend,
     illumination_change_blend,
+    local_color_change_blend,
 )
+
+from preprocessing import make_2x2_tile_preview
 
 DATA_DIR = Path("data")
 
@@ -34,7 +38,8 @@ METHODS = {
     "mixed": mixed_gradients_blend,
     "flatten": texture_flattening_blend,
     "illumination": illumination_change_blend,
-    # "tiling": seamless_tiling_blend,  # diverso dagli altri: preprocessing dei bordi, non un guidance field
+    "color": local_color_change_blend,
+    "tiling": seamless_tiling_blend,
 }
 
 # Parametri CLI specifici per metodo, oltre a quelli comuni (--test, --source, ...).
@@ -52,13 +57,34 @@ EXTRA_ARGS = {
         {"flags": ["--beta"], "type": float, "default": 0.2,
          "help": "Parametro beta di compressione del gradiente, in [0,1] (default 0.2)"},
     ],
+    "color": [
+    {"flags": ["--hue-shift"], "type": float, "default": 0.0,
+     "help": "Spostamento della tonalita' in [0,1], ciclico (default 0.0)"},
+],
 }
 
 # Metodi che lavorano IN-PLACE su un'unica immagine + maschera (nessun compositing
 # tra due immagini diverse): texture flattening e illumination change nel paper si
 # applicano a source stessa (source == target). Per questi non serve un file
 # "source" separato: se manca, si usa direttamente target.
-SELF_EDIT_METHODS = {"flatten", "illumination"}
+SELF_EDIT_METHODS = {"flatten", "illumination","color","tiling"}
+
+# Metodi che non hanno bisogno di una mask.png da file: la maschera viene
+# generata internamente dalla funzione (es. tiling: Omega = tutta l'immagine
+# tranne l'anello esterno).
+NO_MASK_METHODS = {"tiling"}
+
+# Override del nome file da cercare, quando diverso da "target"/"source"/"mask".
+FILE_BASENAME_OVERRIDES = {
+    "tiling": {"target": "texture"},
+}
+
+# Prefisso di cartella diverso da "test", per metodo.
+TEST_DIR_PREFIXES = {"tiling": "texture"}
+
+# Mapping esplicito test-number -> nome cartella, per i metodi con directory
+# "speciali" non numerate in sequenza (illum1, color1).
+TEST_DIR_OVERRIDES = {6: "illum1", 7: "color1"}
 
 def _find_file(test_dir: Path, base_name: str, required: bool = True):
     """Cerca test_dir/base_name.{png,jpg,jpeg}. Se required=False e non trova
@@ -71,44 +97,55 @@ def _find_file(test_dir: Path, base_name: str, required: bool = True):
         raise SystemExit(f"Non trovo '{base_name}' (.png/.jpg/.jpeg) in {test_dir}")
     return None
 
+# Per accorpare i test "speciali" (illum1, color1) con i test numerati, restituisce la cartella
+def _resolve_test_dir(args, method_name: str) -> Path:
+    if method_name in TEST_DIR_PREFIXES:
+        return DATA_DIR / f"{TEST_DIR_PREFIXES[method_name]}{args.test}"
+    if args.test in TEST_DIR_OVERRIDES:
+        return DATA_DIR / TEST_DIR_OVERRIDES[args.test]
+    return DATA_DIR / f"test{args.test}"
+
 
 def resolve_paths(args, method_name: str):
-    """Determina i path di source/mask/target/output.
-
-    Se --test è specificato, usa data/testN/{source,mask,target}.png/jpg/jpeg
-    e come output data/testN/result_<method>.png, a meno che --output non sia
-    dato esplicitamente. Altrimenti richiede --mask/--target espliciti
-    (--source è opzionale per i metodi in SELF_EDIT_METHODS).
-    """
+    """Determina i path di source/mask/target/output."""
     is_self_edit = method_name in SELF_EDIT_METHODS
+    needs_mask = method_name not in NO_MASK_METHODS
+    target_basename = FILE_BASENAME_OVERRIDES.get(method_name, {}).get("target", "target")
 
     if args.test is not None:
-        test_dir = DATA_DIR / ("illum1" if args.test == 6 else f"test{args.test}")
+        test_dir = _resolve_test_dir(args, method_name)
 
-        mask = args.mask or _find_file(test_dir, "mask")
-        target = args.target or _find_file(test_dir, "target")
+        mask = (args.mask or _find_file(test_dir, "mask")) if needs_mask else None
+        target = args.target or _find_file(test_dir, target_basename)
 
         if args.source:
             source = args.source
         else:
-            # per i metodi self-edit la source è opzionale: se manca, usa target
             found = _find_file(test_dir, "source", required=not is_self_edit)
             source = found or target
 
         output = args.output or test_dir / f"result_{method_name}.png"
     else:
-        required_names = ["mask", "target"] if is_self_edit else ["source", "mask", "target"]
+        required_names = ["target"] if is_self_edit else ["source", "target"]
+        if needs_mask:
+            required_names.append("mask")
         missing = [name for name in required_names if getattr(args, name) is None]
         if missing:
             raise SystemExit(
-                f"Devi specificare --test N oppure {'--mask/--target' if is_self_edit else 'tutti i path espliciti'} "
+                f"Devi specificare --test N oppure i path richiesti "
                 f"(mancano: {', '.join('--' + m for m in missing)})"
             )
-        mask, target = args.mask, args.target
+        mask = args.mask if needs_mask else None
+        target = args.target
         source = args.source or (target if is_self_edit else None)
         output = args.output or Path("result.png")
 
-    return Path(source), Path(mask), Path(target), Path(output)
+    return (
+        Path(source) if source else None,
+        Path(mask) if mask else None,
+        Path(target) if target else None,
+        Path(output),
+    )
 
 def add_common_args(subparser):
     """Argomenti condivisi da tutti i sottocomandi (metodi)."""
@@ -158,19 +195,31 @@ def main():
     source = load_image(source_path)
     print(f"[2/4] Carico target: {target_path}")
     target = load_image(target_path)
-    print(f"[3/4] Carico mask:   {mask_path}")
-    mask = load_mask(mask_path)
-    print(f"      Pixel in Omega: {mask.sum()}")
+    
+    if mask_path is not None:
+        print(f"[3/4] Carico mask:   {mask_path}")
+        mask = load_mask(mask_path)
+        print(f"      Pixel in Omega: {mask.sum()}")
+    else:
+        print("[3/4] Nessuna mask da file: generata internamente dal metodo")
+        mask = None
 
     kwargs = extra_kwargs(args, args.method)
     print(f"[4/4] Eseguo metodo '{args.method}'{f' {kwargs}' if kwargs else ''}...")
     t0 = time.time()
     result = blend_fn(source, target, mask, **kwargs)
-    print(f"      Fatto in {time.time() - t0:.2f}s")
+    print(f"      Eseguito in {time.time() - t0:.2f}s")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     save_image(result, output_path)
     print(f"Risultato salvato in: {output_path}")
+
+
+    if args.method == "tiling":
+        preview = make_2x2_tile_preview(result)
+        preview_path = output_path.parent / "tiling_2x2_preview.png"
+        save_image(preview, preview_path)
+        print(f"Anteprima 2x2 salvata in: {preview_path}")
 
 
 if __name__ == "__main__":
