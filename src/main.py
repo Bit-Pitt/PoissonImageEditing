@@ -23,6 +23,7 @@ from variants import (
     texture_flattening_blend,
     illumination_change_blend,
     local_color_change_blend,
+    border_feathering_blend,
 )
 
 from preprocessing import make_2x2_tile_preview
@@ -40,6 +41,7 @@ METHODS = {
     "illumination": illumination_change_blend,
     "color": local_color_change_blend,
     "tiling": seamless_tiling_blend,
+    "feathering": border_feathering_blend,
 }
 
 # Parametri CLI specifici per metodo, oltre a quelli comuni (--test, --source, ...).

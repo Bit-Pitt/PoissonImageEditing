@@ -8,6 +8,7 @@ parametri specifici della variante (sigma, alpha, beta...) arrivano via
 functools.partial prima di chiamare il motore generico solve_poisson.
 """
 from functools import partial
+import cv2
 import numpy as np
 
 from skimage.color import rgb2gray
@@ -89,3 +90,17 @@ def seamless_tiling_blend(source, target, mask, **kwargs):
     tileable_target = build_tileable_boundary_target(source)
     tiling_mask = build_tiling_mask(source.shape)
     return solve_poisson(source, tileable_target, tiling_mask, cloning_guidance_factory)
+
+
+def border_feathering_blend(source, target, mask, **kwargs):
+    """Border feathering: applica un feathering (sfumatura) ai bordi della maschera
+    per ottenere una transizione più morbida tra source e target.
+    """
+    # prendi i pixel al bordo (dove mask == 0 e almeno un vicino == 1) [o contrario?] e cambia il colore del target in 
+    # quella zona con una media tra source e target
+    # [TODO: implementare il feathering vero e proprio, qui è solo un placeholder   ]
+    
+    return solve_poisson(source, target, mask, cloning_guidance_factory)
+
+
+    

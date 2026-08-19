@@ -14,10 +14,11 @@ Implementazione del paper:  [Poisson Image Editing](https://dl.acm.org/doi/10.11
     - Local color change
     - Seamless tiling
 
+Ognuna di queste versioni testabile tramite comando shell.
+
 Aggiunta extra personale:
 - ... spieghi 
 
 Implementazione modalità interattiva:
-- tipo che con il mouse cerchi la parte da copiare --> crea la mask e dopo fa tipo seamless cloning
+- tipo che con il mouse cerchi la parte da copiare --> crea la mask in automatico ==> quindi dopo fa tipo seamless cloning
 
-==> implementa tramite script shell
