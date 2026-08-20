@@ -8,7 +8,6 @@ parametri specifici della variante (sigma, alpha, beta...) arrivano via
 functools.partial prima di chiamare il motore generico solve_poisson.
 """
 from functools import partial
-import cv2
 import numpy as np
 
 from skimage.color import rgb2gray
