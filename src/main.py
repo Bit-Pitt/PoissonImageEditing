@@ -26,7 +26,7 @@ from variants import (
     border_feathering_blend,
 )
 
-from preprocessing import make_2x2_tile_preview
+from tile_preprocessing import make_2x2_tile_preview
 
 DATA_DIR = Path("data")
 
@@ -41,7 +41,8 @@ METHODS = {
     "illumination": illumination_change_blend,
     "color": local_color_change_blend,
     "tiling": seamless_tiling_blend,
-    "feathering": border_feathering_blend,
+    "feather": border_feathering_blend,
+    
 }
 
 # Parametri CLI specifici per metodo, oltre a quelli comuni (--test, --source, ...).
@@ -62,7 +63,13 @@ EXTRA_ARGS = {
     "color": [
     {"flags": ["--hue-shift"], "type": float, "default": 0.0,
      "help": "Spostamento della tonalita' in [0,1], ciclico (default 0.0)"},
-],
+    ],
+    "feather": [
+        {"flags": ["--alpha"], "type": float, "default": 0.5,
+        "help": "Peso del blending sul bordo: 0=nessun feathering, 1=bordo tutto source (default 0.5)"},
+        {"flags": ["--feather-width"], "type": int, "default": 3,
+        "help": "Spessore in pixel dell'anello di bordo sfumato (default 3)"},
+    ],
 }
 
 # Metodi che lavorano IN-PLACE su un'unica immagine + maschera (nessun compositing

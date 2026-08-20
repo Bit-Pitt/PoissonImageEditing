@@ -22,7 +22,7 @@ from guidance import (
     illumination_guidance_factory,
 )
 
-from preprocessing import build_tileable_boundary_target, build_tiling_mask
+from tile_preprocessing import build_tileable_boundary_target, build_tiling_mask
 
 
 def poisson_blend(source, target, mask, **kwargs):
@@ -92,15 +92,40 @@ def seamless_tiling_blend(source, target, mask, **kwargs):
     return solve_poisson(source, tileable_target, tiling_mask, cloning_guidance_factory)
 
 
-def border_feathering_blend(source, target, mask, **kwargs):
-    """Border feathering: applica un feathering (sfumatura) ai bordi della maschera
-    per ottenere una transizione più morbida tra source e target.
-    """
-    # prendi i pixel al bordo (dove mask == 0 e almeno un vicino == 1) [o contrario?] e cambia il colore del target in 
-    # quella zona con una media tra source e target
-    # [TODO: implementare il feathering vero e proprio, qui è solo un placeholder   ]
-    
-    return solve_poisson(source, target, mask, cloning_guidance_factory)
+from scipy.ndimage import binary_dilation       #trova i pixel appena fuori dalla maschera 
+from scipy.ndimage import distance_transform_edt
 
+def border_feathering_blend(source, target, mask, alpha: float = 0.5,
+                              feather_width: int = 3, **kwargs):
+    """Border feathering con alpha decrescente in funzione della distanza dal
+    bordo: i pixel subito fuori dalla maschera prendono quasi tutto 'alpha'
+    verso source, quelli più lontani (fino a feather_width) sfumano verso 0,
+    cosi' la transizione e' morbida.
+
+    Idea di fondo: la condizione al contorno di Dirichlet ancora Poisson
+    esattamente al colore del target sul bordo. Se target e source hanno
+    sfondi molto diversi, quell'ancoraggio e' "brusco" e trascina l'intera
+    regione interna verso un colore molto lontano da quello originale della
+    source . Sfumando il target verso la source proprio sul bordo, l'ancoraggio e' meno drastico
+    e l'oggetto mantiene meglio il proprio colore originale.
+    """
+    # distanza (in pixel) di ogni punto FUORI mask dal pixel di mask piu' vicino
+    dist_from_mask = distance_transform_edt(~mask)
+
+    # anello di interesse: 1..feather_width pixel di distanza dal bordo
+    boundary_ring = (dist_from_mask > 0) & (dist_from_mask <= feather_width)
+
+    # decadimento lineare: alpha pieno a distanza 1, ~0 a distanza feather_width+1
+    alpha_map = np.zeros(mask.shape, dtype=np.float64)
+    alpha_map[boundary_ring] = alpha * (1.0 - (dist_from_mask[boundary_ring] - 1) / feather_width)
+    alpha_map = alpha_map[:, :, None]  # broadcast sui 3 canali
+
+    feathered_target = target.copy()
+    feathered_target[boundary_ring] = (
+        alpha_map[boundary_ring] * source[boundary_ring]
+        + (1 - alpha_map[boundary_ring]) * target[boundary_ring]
+    )
+
+    return solve_poisson(source, feathered_target, mask, cloning_guidance_factory)
 
     

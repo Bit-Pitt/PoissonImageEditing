@@ -7,18 +7,21 @@ Implementazione del paper:  [Poisson Image Editing](https://dl.acm.org/doi/10.11
 
 
 - Sono state implementate tutte le diverse applicazioni descritte dal paper ovvero:
-    - seamless cloning
-    - Seamless cloning con mixing gradients
-    - Texture flattening
-    - Local illumination change
-    - Local color change
-    - Seamless tiling
+    - seamless cloning      [cloning_test.sh]
+    - Seamless cloning con mixing gradients  [mixed_test.sh]
+    - Texture flattening        [flattening_test.sh]
+    - Local illumination change  [illumination_test.sh]
+    - Local color change    [colorChange.sh]
+    - Seamless tiling       [tiling_test.sh]
 
-Ognuna di queste versioni testabile tramite comando shell.
+Ognuna di queste versioni testabile tramite lo script shell sopra elencato.
 
 Aggiunta extra personale:
-- ... spieghi 
+- feathering + Poisson: per una transizione più dolce tra target e source con l'idea di preservare il colore originale dell'oggetto   [featherCloning.sh]
 
-Implementazione modalità interattiva:
-- tipo che con il mouse cerchi la parte da copiare --> crea la mask in automatico ==> quindi dopo fa tipo seamless cloning
+
+Cartella "create_test":
+- contiene due utility per la creazione veloce di una cartella di test:
+- resize.py per ridimensionare l'immagine "source.jpeg" alle dimensioni di "target.jpeg".
+- create_mask per generare la mask da GUI
 

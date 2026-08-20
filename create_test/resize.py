@@ -5,8 +5,8 @@
 import cv2
 
 # Nomi delle immagini
-source_name = "panda.jpeg"
-target_name = "target.jpeg"
+source_name = "source.jpeg"
+target_name = "target.avif"
 
 # Carica immagini
 source = cv2.imread(source_name)
